@@ -1,0 +1,433 @@
+<?php
+
+namespace wideweb\brokerBundle\Command;
+
+use Symfony\Bundle\FrameworkBundle\Command\ContainerAwareCommand;
+use Symfony\Component\Console\Input\InputArgument;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
+
+use wideweb\brokerBundle\Services\Sms;
+use wideweb\BrokerBundle\Entity\Region;
+use wideweb\BrokerBundle\Entity\Client;
+use wideweb\BrokerBundle\Entity\User;
+
+use wideweb\brokerBundle\Services\Roistat;
+use wideweb\brokerBundle\Services\Amocrm;
+
+use wideweb\brokerBundle\Entity\EverydayStat;
+
+class AmoImportCommand extends ContainerAwareCommand
+{
+
+	/**
+	 * ✓ Георгий Величковский	367;2154202
+	 * ✓ Александр Морозов		334;2154208 (1 заявка)
+	 * ✓ Александр Константинов	355;2154199 (256 заявок)
+	 * ✓ Артём Семушев			368;2222587 (187 заявок)
+	 * Павел Величко	2583469
+	 */
+	const USER_ID = 367;
+	const AMO_USER_ID = 2154202;
+
+
+	const GOSHA_MANAGER_AMO = 2154202;
+	const AMO_CLIENT_STATUS = 18441673;	//Amo-статус "Успешно использует", воронка "сопровождение"
+
+
+	protected function configure()
+    {
+        $this
+            ->setName('broker:AmoSend')
+            ->setDescription('Отправка заявок в Amocrm')
+        ;
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output)
+    {
+        set_time_limit(0);
+
+		var_dump('!2');die;
+
+		// $this->amoSend();
+        $this->sendHrsClients();
+    }
+
+
+    protected function amoSend() {
+
+		/*
+		 *
+/var/www/fincrm/data/www/t1.fincrm.ru/app/console broker:AmoSend
+
+		 */
+
+		var_dump('!');die;
+        $em = $this->getContainer()->get('doctrine')->getManager('default');
+
+        //$user = $em->getRepository('widewebbrokerBundle:User')->find(USER_ID);
+
+        $regions = $em->getRepository('widewebbrokerBundle:Region')->findBy(array('id'=>[44,48]));
+
+        date_default_timezone_set($regions[0]->getTimezone());
+
+        $now = (new \DateTime('now'))->format('Y-m-d');
+
+        $userClient = $em->createQueryBuilder('c')
+            ->select('c as client, IDENTITY(c.manager)')
+            ->from('widewebbrokerBundle:Client', 'c')
+            ->where('c.manager = (:mngr)')
+			->setParameter('mngr', self::USER_ID)
+			->andWhere('c.statusID = 2')
+			->andWhere("c.calendarStart >= '$now'")
+			->andWhere("c.calendarStart < '2018-08-01'")
+            ->getQuery()
+            ->getResult();
+
+        var_dump('Всего заявок:');
+		var_dump(count($userClient));
+
+
+
+      	$count = 0;
+
+      	$i=0;
+        if(count($userClient) > 0) {
+        	foreach ($userClient as $client) {
+				// if(++$i>1) {
+        			// continue;
+				// }
+
+        		var_dump($client['client']->getId());
+
+
+				$status_id = 17842732;//Новая заявка (главная воронка)
+
+				$clientCom = $em->createQueryBuilder('co')
+								 ->select('co.text, co.date')
+								 ->from('widewebbrokerBundle:Comment', 'co')
+								 ->where('co.clientID = (:clid)')
+								 ->setParameter('clid', $client['client']->getId())
+								 ->orderBy('co.date', 'ASC') //DESC отсортирует от новых к старым
+								 ->getQuery()
+								 ->getResult();
+				$comments = 'https://hr.fincrm.ru/client/status?crm_client_id='.$client['client']->getId();
+				//var_dump($userCom);exit;
+				if(count($clientCom) >0) {
+					foreach($clientCom as $com) {
+						if(stristr($com['text'], 'оплат') || stristr($com['text'], 'тариф')) {
+							$status_id = self::AMO_CLIENT_STATUS;
+						}
+						if($com['text'] == 'но') continue;
+						if(stristr($com['text'], 'Дата звонка')) continue;
+						$comments .= "\n\n".    $com['date']->format('Y-m-d H:i');
+						$comments .= " ".$com['text'];
+					}
+				}
+
+				echo  '---'.$client['client']->getId();
+
+				// $contName = $client['client']->getFirstName().' '.$client['client']->getLastName();
+				$contName = '';
+				if(trim($client['client']->getFirstName()) != '') {
+					$contName .= $client['client']->getFirstName();
+				}
+				if(trim($client['client']->getLastName()) != '') {
+					$contName .= ' '.$client['client']->getLastName();
+				}
+
+				if(trim($contName) == '') {
+					$contName = 'Без имени';
+				}
+
+				$amoContactData['add'] =
+				[
+					[
+						'name'=> $contName,
+						'responsible_user_id' => self::AMO_USER_ID,
+						'created_by' => self::AMO_USER_ID,
+						//'created_at' => $client['client']->getDateAdded()->getTimestamp(),
+						'created_at' => (new \DateTime('now'))->getTimestamp(),
+
+						'tags' => 'old_crm_import',
+
+						'custom_fields' => [
+							array(
+								'id'=>220829, #Уникальный индентификатор заполняемого дополнительного поля
+								'values'=>array(
+									array(
+										'value'=>$client['client']->getPhone(), # в качестве разделителя используется точка
+										'enum' => "WORK"
+									)
+								)
+							),
+							array(
+								'id'=>220831, #Уникальный индентификатор заполняемого дополнительного поля
+								'values'=>array(
+									array(
+										'value'=>$client['client']->getEmail(), # в качестве разделителя используется точка //dzho.sssilvier@mail.ru'
+										'enum' => "WORK"
+									)
+								)
+							),
+						]
+					]
+				];
+				// var_dump($amoContactData);
+				
+				$contact = Amocrm::add_contact($amoContactData);//id = $contact['_embedded']['items'][0]['id']
+				// var_dump($contact);
+				//exit;
+				if(empty($contact['_embedded']['items'])) continue;
+				$contact_id = $contact['_embedded']['items'][0]['id'];
+				
+
+/*
+				$amoUpdateContactData['update'] = [
+					[
+						'id' =>  19576701,
+						'updated_at' => (new \DateTime('now'))->getTimestamp(),
+						'last_modified' => (new \DateTime('now'))->getTimestamp(),
+						'custom_fields' => [
+							array(
+								'id'=>220829, #Уникальный индентификатор заполняемого дополнительного поля
+								'values'=>array(
+									array(
+										'value'=>'754642225', # в качестве разделителя используется точка
+										'enum' => "WORK"
+									)
+								)
+							),
+							array(
+								'id'=>220831, #Уникальный индентификатор заполняемого дополнительного поля
+								'values'=>array(
+									array(
+										'value'=>'dzho@silvmail3.ru', # в качестве разделителя используется точка
+										'enum' => "WORK"
+									)
+								)
+							),
+						]
+					]
+				];
+
+				$update = Amocrm::update_contact($amoUpdateContactData);*/
+				// var_dump($contact);
+				//var_dump($update);
+
+				echo '------------------'.PHP_EOL;
+
+				//статусы воронки сопровождения: 18441670 - принять нового клиента, 18441673-успешно использует
+
+				$amoLeadData['add'] =
+				[
+					[
+						'name' => 'Импорт client_'.$client['client']->getId(),
+						'status_id' => $status_id,
+						'responsible_user_id' => ($status_id === self::AMO_CLIENT_STATUS) ? self::GOSHA_MANAGER_AMO : self::AMO_USER_ID,
+						'tags' => 'old_crm_import',
+						'contacts_id' => [
+							$contact_id.""
+						],
+					]
+
+				];
+
+				$lead = Amocrm::add_lead($amoLeadData);
+				$lead_id = $lead['_embedded']['items'][0]['id'];
+				var_dump('Лид ok');
+				// var_dump($lead);
+
+				$noteText = $comments;
+				$amoNoteData['add'] =
+				[
+					[
+						'element_id'=>$lead_id, #ID сделки
+						'element_type'=>2, #Показываем, что это - сделка, а не контакт	
+						'text' => $noteText,
+						'note_type' => 4,
+						'created_at' => (new \DateTime('now'))->getTimestamp(),
+						'responsible_user_id' => self::AMO_USER_ID,
+					]
+
+				];
+				$note = Amocrm::add_note($amoNoteData);
+				// var_dump($note);
+
+				$amoTaskData['add'] = [
+					[
+						'element_id'=>$lead_id, #ID сделки
+						'element_type'=>2, #Показываем, что это - сделка, а не контакт
+						"task_type"=> [
+							[
+								"id" => 1,//звонок
+								"name"=> "Связаться с клиентом",
+								"code"=> "CALL"
+							]
+						],
+						'text'=>'Перезвон назначен на '.$client['client']->getCalendarStart()->format('Y-m-d H:i'),
+						'responsible_user_id'=>self::AMO_USER_ID,
+						//'complete_till_at'=>(new \DateTime('now'))/*->modify('+10 days')*/->getTimestamp()//TEST
+						'complete_till_at'=>$client['client']->getCalendarStart()->getTimestamp()
+					]
+				];
+				//после импорта переставляем дату перезвона на 1е августа
+				$client['client']->setCalendarStart((new \DateTime('2018-08-01 10:10')));
+				$client['client']->setCalendarEnd((new \DateTime('2018-08-01 10:30')));
+				$em->persist($client['client']);
+				$em->flush();
+				$task = Amocrm::add_task($amoTaskData);
+				// var_dump($task);
+				//if($count == 10) exit;
+				$count ++;
+				echo '+++++++'.$count;
+				sleep(5);
+
+				//exit;
+
+			}
+		}
+
+
+        echo "\nok_send";
+    }
+
+    protected function sendHrsClients() {
+		//	 -- сумма покупок в HRS с сортировкой от большей к меньшей, не отправллись раньше в Амо. добавляем в Сопровождение-Клиент HRS
+
+// SELECT u.id, u.first_name, u.last_name, u.email, SUM(b.money) AS spent, u.`contact` AS phoneNum, COALESCE (u.company, '') AS companyName, COALESCE (u.`num`, 0) AS num, u.`additional_test` AS testsWas, u. `additional_test` - COALESCE(u.`send`, 0) AS testsNow, DATE_FORMAT(u.`regdate`, '%d.%c.%Y') AS regDate, DATE_FORMAT(u.`last_login`, '%d.%c.%Y') AS lastLogin FROM `balance` AS b join fos_user as u on u.id = b.user where b.status = 1 and u.email not in (select email from amoLeadLog) group by b.user order by spent desc
+
+		$users= array(
+			array('id' => '26071','first_name' => 'Tatiana','last_name' => 'Nesterenko','email' => 'tatiana@rstudio.by','spent' => '7600','phoneNum' => '','companyName' => 'Rstudio','num' => '15','testsWas' => '31','testsNow' => '9','regDate' => '14.12.2015','lastLogin' => '27.12.2015'),
+			array('id' => '25930','first_name' => 'Ксения','last_name' => 'Янковская','email' => 'ksenia@ilovemakeup.ru','spent' => '7600','phoneNum' => '+7 (911) 927-6039','companyName' => '','num' => '7','testsWas' => '359','testsNow' => '25','regDate' => '01.11.2015','lastLogin' => '01.11.2017'),
+			array('id' => '5','first_name' => 'Admina','last_name' => '','email' => 'support@hrscanner.ru','spent' => '10','phoneNum' => '+7(965)009-60-86','companyName' => '','num' => '1','testsWas' => '26421','testsNow' => '11663','regDate' => '19.8.2015','lastLogin' => '31.7.2018')
+		);
+		$users = array_slice($users,0,100); // первые 115 закоменчены уже в массиве
+
+		$i = 0;
+		$added=0;
+		foreach ($users as $user) {
+			if (Amocrm::is_contact_exist($user['email'])) {
+				sleep(1);
+				var_dump($i++ .' skip user '. $user['email']);
+				continue;
+			}
+
+			// $userId = $user['id'];
+			// $user = $user['first_name']; // last_name
+			/*
+			 * email,spent,phoneNum,companyName,num,testsWas,testsNow,regDate,lastLogin
+			 */
+
+// 				'status_id' => '20276086' // Amo-статус "Клиент Hrscanner", воронка "сопровождение"
+// 			$annaManager = 2415907;
+
+			$userName = $user['first_name'] . ' ' .  $user['last_name'];
+			$userName = trim($userName);
+			$userName = $userName ? $userName : 'Нет имени';
+
+			$amoContactData['add'] =
+				[
+					[
+						'name'=>  $userName,
+						'responsible_user_id' => 2583469,
+						'created_by' => 2583469,
+						'created_at' => (new \DateTime('now'))->getTimestamp(),
+
+						'tags' => 'hrs_clients_crm_import',
+
+						'custom_fields' => [
+							array(
+								'id'=>220829, #Уникальный индентификатор заполняемого дополнительного поля
+								'values'=>array(
+									array(
+										'value'=>$user['phoneNum'], # в качестве разделителя используется точка
+										'enum' => "WORK"
+									)
+								)
+							),
+							array(
+								'id'=>220831, #Уникальный индентификатор заполняемого дополнительного поля
+								'values'=>array(
+									array(
+										'value'=>$user['email'], # в качестве разделителя используется точка //dzho.sssilvier@mail.ru'
+										'enum' => "WORK"
+									)
+								)
+							),
+						]
+					]
+				];
+
+			// var_dump('контакт', $amoContactData);
+			$contact = Amocrm::add_contact($amoContactData);//id = $contact['_embedded']['items'][0]['id']
+			// if(empty($contact['_embedded']['items'])) continue;
+
+
+			// var_dump($contact);
+			//
+			// die;
+			$contact_id = $contact['_embedded']['items'][0]['id'];
+
+			$amoLeadData['add'] =
+				[
+					[
+						'name' => 'Импорт клиента hrsID: #'.$user['id'],
+						'status_id' => '20276086',
+						'responsible_user_id' => 2583469,
+						'tags' => 'hrs_clients_crm_import',
+						'contacts_id' => [
+							$contact_id.""
+						],
+					]
+
+				];
+
+			// var_dump('лид', $amoLeadData);
+			$lead = Amocrm::add_lead($amoLeadData);
+			$lead_id = $lead['_embedded']['items'][0]['id'];
+			// var_dump('Лид ok');
+			// var_dump($lead);
+
+			$noteText = '';
+			$noteText .= $user['companyName'] ? ('Компания "' . $user['companyName']. '"' . ($user['num'] ? (' (' .$user['num'] . ' сотрудников)' ) : '')) : '';
+			if (!empty($noteText)) {
+				$noteText .= "\n";
+			}
+			$noteText .= 'Всего было тестов ' . $user['testsWas'] . "\n";
+			$noteText .= 'Сейчас на балансе ' . $user['testsNow'] ."\n";
+			$noteText .= 'Последний раз авторизировался ' . $user['lastLogin'];
+
+			$amoNoteData['add'] =
+				[
+					[
+						'element_id'=>$lead_id, #ID сделки
+						'element_type'=>2, #Показываем, что это - сделка, а не контакт
+						'text' => $noteText,
+						'note_type' => 4,
+						'created_at' => (new \DateTime('now'))->getTimestamp(),
+						'responsible_user_id' => 2583469,
+					]
+
+				];
+			// var_dump('заметка', $amoNoteData);
+			$note = Amocrm::add_note($amoNoteData);
+
+
+
+			var_dump($i++ .' added user '. $user['email']);
+			++$added;
+
+			if ($added ===66) {
+				break;
+			}
+
+			sleep(5);
+
+		}
+
+		var_dump('done. added ' .$added);
+	}
+
+}
